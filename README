@@ -53,6 +53,12 @@ BACKGROUND
     they are essential for convenient and efficient asynchronous
     programming.
 
+    The Callback::Frame philosophy is that for many applications we really
+    like callback style and don't wish to run (or pretend to run) multiple
+    blocking tasks at once. Callback::Frame just tries to simplify the
+    management of dynamic environments (defined below) while leaving
+    callback style alone.
+
 DESCRIPTION
     The problem that this module solves is that although closures preserve
     their lexical environment, they don't preserve their dynamic
@@ -118,10 +124,11 @@ DESCRIPTION
 
         Oops: some error at fixed.pl line 8.
 
-    We created two framed to accomplish this: A root frame to contain the
-    exception handler, and another frame to use as a callback. Because the
-    callback frame is created while the root frame is running, the callback
-    will preserve the dynamic environment of the root frame.
+    We created two frames to accomplish this: A root frame to contain the
+    exception handler, and a nested frame to use as a callback. Because the
+    nested callback frame is created while the root frame is executing, the
+    callback will preserve the dynamic environment (including the exception
+    handler) of the root frame.
 
 USAGE
     This module exports two functions, "frame" and "fub".
@@ -134,9 +141,9 @@ USAGE
     "code".
 
     IMPORTANT NOTE: All callbacks that may be invoked outside the dynamic
-    environment of the current frame should be wrapped in a new "frame" or
-    "fub" call so that the dynamic environment will be correctly re-applied
-    when the callback is invoked.
+    environment of the current frame should be created with "frame" or "fub"
+    so that the dynamic environment will be correctly re-applied when the
+    callback is invoked.
 
     "fub" is a wrapper around frame and exists to simplify converting
     existing callbacks into Callback::Frame enabled code. For example, given
@@ -171,6 +178,13 @@ USAGE
     frame is currently being executed.
 
 NESTING AND STACK-TRACES
+    Callback::Frame tries to make adding error handling support to an
+    existing asynchronous application as easy as possible by not forcing you
+    to pass extra parameters around. It should also make lifer easier
+    because as a side effect of adding error checking it also can be made to
+    produce detailed and useful "stack traces" that track the callback
+    history of some connection or transaction.
+
     Frames can be nested. When an exception is raised, the most deeply
     nested "catch" handler is invoked. If this handler itself throws an
     error, the next most deeply nested handler is invoked with the new
@@ -216,8 +230,8 @@ NESTING AND STACK-TRACES
     and bindings.
 
     However, with dynamic variables the same variable can refer to different
-    bindings at different times. That's why they are called "dynamic"
-    variables and lexical variables are called "static" variables.
+    bindings at different times. That's why they are called "dynamic" and
+    lexical variables are called "static".
 
     Because any code in any file, function, or package can access a dynamic
     variable, they are the opposite of local. They are global. However, the
@@ -226,14 +240,15 @@ NESTING AND STACK-TRACES
     sometimes they will get "shadowed" by some other binding and will come
     back again later.
 
-    OK, to make this concrete, after running this bit of code the binding
-    containing 2 is lost forever:
+    OK, to make this concrete, here the binding containing 2 is lost
+    forever:
 
         our $foo = 1;
         my $cb;
 
         {
-          local $foo = 2;
+          local $foo;
+          $foo = 2;
           $cb = sub {
             return $foo;
           };
@@ -251,9 +266,9 @@ NESTING AND STACK-TRACES
         frame(local => __PACKAGE__ . '::foo',
               code => sub {
           $foo = 2;
-          $cb = frame(code => sub {
+          $cb = fub {
             return $foo;
-          });
+          };
         })->();
 
         say $foo;     # 1
@@ -261,9 +276,8 @@ NESTING AND STACK-TRACES
         say $foo;     # 1
 
     Don't be fooled into thinking that this is a lexical binding though.
-    While the variable $foo points to the binding containing 2, all parts of
-    the program will see this binding as demonstrated in the following
-    example:
+    While the callback $cb is executing, all parts of the program will see
+    the 2 binding:
 
         our $foo = 1;
         my $cb;
@@ -275,14 +289,14 @@ NESTING AND STACK-TRACES
         frame(local => __PACKAGE__ . '::foo',
               code => sub {
           $foo = 2;
-          $cb = frame(code => sub {
+          $cb = fub {
             return global_foo_getter();
-          });
+          };
         })->();
 
         say $foo;     # 1
         say $cb->();  # 2  <- still 2
-        $foo;         # 1
+        say $foo;     # 1
 
     You can install multiple local variables in the same frame:
 
@@ -294,9 +308,9 @@ NESTING AND STACK-TRACES
     the event of an error the local bindings will not be present inside the
     "catch" handler (use a nested frame if you need this).
 
-    All variable names must be fully package qualified. The easiest way to
-    do this for variables in your current package is to use the ugly
-    "__PACKAGE__ ." technique.
+    All variable names must be fully package qualified. The best way to do
+    this for variables in your current package is to use the ugly
+    "__PACKAGE__" technique.
 
     Objects stored in local bindings managed by Callback::Frame will not be
     destroyed until all references to the frame-wrapped callback that
@@ -306,20 +320,13 @@ NESTING AND STACK-TRACES
 SEE ALSO
     <The Callback::Frame github repo>
 
-    The Callback::Frame philosophy is that we actually like callback style
-    and just want to simplify the reseting of dynamic environments as
-    necessary. This module should make adding error handling support to an
-    existing asynchronous application as easy as possible (it shouldn't
-    force you to pass extra parameters around). Finally, this module should
-    make lifer easier because as a side effect of adding error checking it
-    should also produce detailed and useful stack traces.
-
     This module's "catch" syntax is of course modeled after "normal
     language" style exception handling as implemented by Try::Tiny &c.
 
-    This module depends on "Guard" to maintain the
-    $Callback::Frame::active_frames datastructure, and to ensure that even
-    when exceptions are thrown, "local" binding updates aren't lost.
+    This module depends on Guard to maintain the
+    $Callback::Frame::active_frames datastructure and to ensure that "local"
+    binding updates aren't lost even when exceptions or other non-local
+    returns occur.
 
     AnyEvent::Debug is a very interesting and useful module that provides an
     interactive debugger for AnyEvent applications and uses some of the same
@@ -342,12 +349,6 @@ BUGS
     For now, "local" bindings can only be created in the scalar namespace.
     Also, none of the other nifty things that local can do (like localising
     a hash table value) are supported yet.
-
-    The "local" implementation is currently pretty inefficient. It evals a
-    string that returns a sub whenever a frame is entered. Fortunately,
-    perl's compiler is really fast. Also, this overhead is not there at all
-    when you are only using the "catch" functionality which I anticipate to
-    be the most common usage pattern.
 
 AUTHOR
     Doug Hoyte, "<doug@hcsw.org>"
