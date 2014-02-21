@@ -1,25 +1,24 @@
----
-abstract: unknown
-author:
-  - unknown
-build_requires:
-  ExtUtils::MakeMaker: 0
+--- #YAML:1.0
+name:               Callback-Frame
+version:            1.100
+abstract:           ~
+author:  []
+license:            perl
+distribution_type:  module
 configure_requires:
-  ExtUtils::MakeMaker: 0
-dynamic_config: 1
-generated_by: 'ExtUtils::MakeMaker version 6.62, CPAN::Meta::Converter version 2.112620'
-license: perl
-meta-spec:
-  url: http://module-build.sourceforge.net/META-spec-v1.4.html
-  version: 1.4
-name: Callback-Frame
-no_index:
-  directory:
-    - t
-    - inc
+    ExtUtils::MakeMaker:  0
+build_requires:
+    ExtUtils::MakeMaker:  0
 requires:
-  Guard: 0
+    Guard:  0
 resources:
-  bugtracker: https://github.com/hoytech/Callback-Frame/issues
-  repository: git://github.com/hoytech/Callback-Frame.git
-version: 1.003
+    bugtracker:  https://github.com/hoytech/Callback-Frame/issues
+    repository:  git://github.com/hoytech/Callback-Frame.git
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.57_05
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4

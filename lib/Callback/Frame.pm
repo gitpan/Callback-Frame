@@ -2,11 +2,11 @@ package Callback::Frame;
 
 use strict;
 
-our $VERSION = '1.003';
+our $VERSION = '1.100';
 
 require Exporter;
 use base 'Exporter';
-our @EXPORT = qw(frame fub);
+our @EXPORT = qw(frame fub frame_try frame_catch frame_local);
 
 use Scalar::Util;
 use Carp qw/croak/;
@@ -40,6 +40,7 @@ sub frame {
 
   $name ||= 'ANONYMOUS FRAME';
   my ($package, $filename, $line) = caller;
+  ($package, $filename, $line) = caller(1) if $package eq __PACKAGE__; ## if we're called from fub or frame_try
   $name = "$filename:$line - $name";
 
   defined $code || croak "frame needs a 'code' callback";
@@ -194,17 +195,37 @@ sub generate_trace {
 }
 
 
+sub frame_try (&;@) {
+  my ($try_block, $catch_block) = @_;
+
+  return frame(code => $try_block, catch => $catch_block)->();
+}
+
+sub frame_catch (&) {
+  my ($block) = @_;
+
+  croak "Useless bare frame_catch" unless wantarray;
+
+  return $block;
+}
+
+sub frame_local ($&) {
+  my ($local, $block) = @_;
+
+  return frame(code => $block, local => $local)->();
+}
+
 
 1;
 
 
 __END__
 
+=encoding utf-8
 
 =head1 NAME
 
 Callback::Frame - Preserve error handlers and "local" variables across callbacks
-
 
 =head1 SYNOPSIS
 
@@ -212,28 +233,24 @@ Callback::Frame - Preserve error handlers and "local" variables across callbacks
 
     my $callback;
 
-    frame(name => "base frame",
-          code => sub {
-                    $callback = frame(name => "frame #1",
-                                      code => sub {
-                                                die "some error";
-                                              });
-                  },
-          catch => sub {
-                     my $stack_trace = shift;
-                     print $stack_trace;
-                     ## Also, $@ is set to "some error at ..."
-                   }
-    )->();
+    frame_try {
+      $callback = fub {
+                    die "some error";
+                  };
+    } frame_catch {
+       my $stack_trace = shift;
+       print $stack_trace;
+       ## Also, $@ is set to "some error at ..."
+    };
 
     $callback->();
 
 This will print something like:
 
-    some error at synopsis.pl line 9.
+    some error at tp.pl line 7.
     ----- Callback::Frame stack-trace -----
-    synopsis.pl:10 - frame #1
-    synopsis.pl:17 - base frame
+    synopsis.pl:8 - ANONYMOUS FRAME
+    synopsis.pl:13 - ANONYMOUS FRAME
 
 
 =head1 BACKGROUND
@@ -253,7 +270,7 @@ will print C<123> even though C<$var> is no longer in scope when the callback is
 
 Sometimes people call these anonymous functions that reference variables in their surrounding lexical scope "closures". Whatever you call them, they are essential for convenient and efficient asynchronous programming. 
 
-The Callback::Frame philosophy is that for many applications we really like callback style and don't wish to run (or pretend to run) multiple blocking tasks at once. Callback::Frame just tries to simplify the management of dynamic environments (defined below) while leaving callback style alone.
+For many applications we really like straightforward callback style. The goal of Callback::Frame is to simplify the management of dynamic environments (defined below) while leaving callback style alone.
 
 
 =head1 DESCRIPTION
@@ -278,31 +295,28 @@ Consider the following piece of B<broken> code:
 
     AE::cv->recv;
 
-The intent behind the C<eval> above is obviously to catch any exceptions thrown inside the callback. However, this will not work because the C<eval> will only be in effect while installing the callback in the event loop, not while running the callback. When the event loop calls the callback, it will probably wrap its own C<eval> around the callback and you will see something like this:
+The intent behind the C<eval> above is obviously to catch any exceptions thrown by the callback. However, this will not work because the C<eval> will only be in effect while installing the callback in the event loop, not while running the callback. When the event loop calls the callback, it will probably wrap its own C<eval> around the callback and you will see something like this:
 
     EV: error in callback (ignoring): some error at broken.pl line 6.
 
 (The above applies to L<EV> which is a well-designed event loop. Other event loops may fail more catastrophically.)
 
-So the root of the problem is that the dynamic environment has not been preserved. In this case it is the dynamic exception handlers that were not preserved. In some other cases we would like to preserve dynamically scoped (aka "local") variables (see below).
+The root of the problem is that the dynamic environment has not been preserved. In this case it is the dynamic exception handlers that we would like to preserve. In some other cases we would like to preserve dynamically scoped (aka "local") variables (see below).
 
 By the way, "lexical" and "dynamic" are the lisp terms. When it applies to variables, perl confusingly calls dynamic scoping "local" scoping, even though the scope is temporal, not local.
 
-Here is how we could fix this code using L<Callback::Frame>:
+Here is how we could fix the code above using L<Callback::Frame>:
 
     use AnyEvent;
     use Callback::Frame;
 
-    frame(
-      code => sub {
-        $watcher = AE::timer 0.1, 0,
-          frame(code => sub {
-                          die "some error";
-                        });
-      }, catch => sub {
-        print STDERR "Oops: $@";
-      }
-    )->();
+    frame_try {
+      $watcher = AE::timer 0.1, 0, fub {
+                                     die "some error";
+                                   };
+    } frame_catch {
+      print STDERR "Oops: $@";
+    };
 
     AE::cv->recv;
 
@@ -310,19 +324,19 @@ Now we see the desired error message:
 
     Oops: some error at fixed.pl line 8.
 
-We created two frames to accomplish this: A root frame to contain the exception handler, and a nested frame to use as a callback. Because the nested callback frame is created while the root frame is executing, the callback will preserve the dynamic environment (including the exception handler) of the root frame.
+We created two frames to accomplish this: A root frame with C<frame_try> which contains the exception handler, and a nested frame with C<fub> to use as a callback. Unlike C<fub>, C<frame_try> immediately executes its frame. Because the nested callback frame is created while the root frame is executing, the callback will preserve the dynamic environment (including the exception handler) of the root frame.
 
 
 
 =head1 USAGE
 
-This module exports two functions, C<frame> and C<fub>.
+This module exports five subs: C<frame>, C<fub>, C<frame_try>, C<frame_catch>, and C<frame_local>.
 
-C<frame> is the general interface and requires at least a C<code> argument which should be a coderef (a function or a closure). It will return another coderef that "wraps" the coderef you passed in. When this codref is run, it will re-instate the dynamic environment that was present when the frame was created, and then run the coderef that you passed in as C<code>.
+C<frame> is the general interface. The other subs are just syntactic sugar around C<frame>. C<frame> requires at least a C<code> argument which should be a coderef (a function or a closure). It will return another coderef that "wraps" the coderef you passed in. When this wrapped codref is run, it will reinstate the dynamic environment that was present when the frame was created, and then run the coderef that you passed in as C<code>.
 
-B<IMPORTANT NOTE>: All callbacks that may be invoked outside the dynamic environment of the current frame should be created with C<frame> or C<fub> so that the dynamic environment will be correctly re-applied when the callback is invoked.
+C<frame> also accepts C<catch>, C<local>, C<existing_frame>, and C<name> parameters which are described below.
 
-C<fub> is a wrapper around frame and exists to simplify converting existing callbacks into Callback::Frame enabled code. For example, given the following L<AnyEvent> statement:
+C<fub> simplifies the conversion of existing callback code into Callback::Frame enabled code. For example, given the following L<AnyEvent> statement:
 
     $watcher = AE::io $sock, 0, sub { do_stuff() };
 
@@ -330,7 +344,9 @@ In order for the callback to have its dynamic environment maintained, you just n
 
     $watcher = AE::io $sock, 0, fub { do_stuff() };
 
-C<frame> and C<fub> both also accept C<catch> and C<local> parameters which are described in detail below.
+B<IMPORTANT NOTE>: All callbacks that may be invoked outside the dynamic environment of the current frame should be created with C<frame> or C<fub> so that the dynamic environment will be correctly re-applied when the callback is invoked.
+
+The C<frame_try> and C<frame_catch> subs are equivalent to a call to C<frame> with C<code> and C<catch> parameters. However, unlike with C<frame>, the frame is executed immediately.
 
 Libraries that wrap callbacks in frames can use the C<Callback::Frame::is_frame()> function to determine if a given callback is already wrapped in a frame. It returns true if the callback is wrapped in a frame and is therefore suitable for use with C<existing_frame>. Sometimes libraries like to automatically wrap a callback in a frame unless it already is one:
 
@@ -352,7 +368,7 @@ Although you should never need to, the internal frame stack can be accessed at C
 
 =head1 NESTING AND STACK-TRACES
 
-Callback::Frame tries to make adding error handling support to an existing asynchronous application as easy as possible by not forcing you to pass extra parameters around. It should also make lifer easier because as a side effect of adding error checking it also can be made to produce detailed and useful "stack traces" that track the callback history of some connection or transaction.
+Callback::Frame tries to make adding error handling support to an existing asynchronous application as easy as possible by not forcing you to pass extra parameters around. It should also make life easier because as a side effect of adding error checking it also can be made to produce detailed and useful "stack traces" that track the callback history of some connection or transaction.
 
 Frames can be nested. When an exception is raised, the most deeply nested C<catch> handler is invoked. If this handler itself throws an error, the next most deeply nested handler is invoked with the new exception but the original stack trace. If the last C<catch> handler re-throws the error, the error will be thrown in whatever dynamic environment was in place when the callback was called, usually the event loop's top-level handler (probably not what you want).
 
@@ -368,15 +384,15 @@ Since multiple frames can be created within the same parent frame and therefore 
 
 =head1 "LOCAL" VARIABLES
 
-In the same way that using C<catch> as described above preserves the dynamic environment of error handlers, C<local> preserves the dynamic environment of variables. Of course, the scope of these bindings is not actually local in the physical sense of the word, only in the perl sense.
+In the same way that using C<frame_catch> or the C<catch> parameter to C<frame> preserves the dynamic environment of error handlers, the C<frame_local> function or C<local> parameter to C<frame> can be used to preserve the dynamic environment of local variables. Of course, the scope of these bindings is not actually local in the physical sense of the word, only in the perl sense.
 
-Technically, C<local> maintains the dynamic environment of B<bindings>. The distinction between variables and bindings is subtle but important. See, when a lexical binding is created, it is there "forever" -- or at least until it is no longer reachable by your program according to the rules of lexical scoping. Therefore, lexical variables are statically mapped to bindings and it is redundant to distinguish between lexical variables and bindings.
+Technically, perl's C<local> maintains the dynamic environment of B<bindings>. The distinction between variables and bindings is subtle but important. See, when a lexical binding is created, it is there "forever" -- or at least until it is no longer reachable by your program according to the rules of lexical scoping. Therefore, bindings are statically mapped to lexical variables and it is redundant to distinguish between the two.
 
-However, with dynamic variables the same variable can refer to different bindings at different times. That's why they are called "dynamic" and lexical variables are sometimes called "static".
+However, with dynamic variables the same variable accessed in the same part of your code can refer to different bindings at different times. That's why they are called "dynamic" and lexical variables are sometimes called "static".
 
-Because any code in any file, function, or package can access a dynamic variable, they are the opposite of local. They are global. However, the bindings are only global for a little while at a time. After a while they will go out of scope and then they are no longer visible at all. Or sometimes they will get "shadowed" by some other binding and will come back again later.
+Because any code in any file, function, or package can access a dynamic variable, they are the opposite of local. They are global. However, the bindings are only global for a little while at a time. After a while they go out of scope and then they are no longer visible at all. Or sometimes they will get "shadowed" by some other binding and will come back again later. Because when they are accessed determines which binding is referenced, dynamic variables are actually temporally scoped, not locally scoped (perl nomenclature notwithstanding).
 
-To make this concrete, here the binding containing C<2> is lost forever:
+To make all this concrete, consider how the binding containing C<2> is lost forever in this bit of code:
 
     our $foo = 1;
     my $cb;
@@ -398,19 +414,18 @@ Here's a way to "fix" that using Callback::Frame:
     our $foo = 1;
     my $cb;
 
-    frame(local => __PACKAGE__ . '::foo',
-          code => sub {
+    frame_local __PACKAGE__.'::foo', sub {
       $foo = 2;
       $cb = fub {
         return $foo;
       };
-    })->();
+    };
 
     say $foo;     # 1
     say $cb->();  # 2  <- hooray!
     say $foo;     # 1
 
-Don't be fooled into thinking that this is a lexical binding though. While the callback C<$cb> is executing, all parts of the program will see the C<2> binding:
+Don't be fooled into thinking that this is a lexical binding though. While the callback C<$cb> is executing, all parts of the program will see the binding containing C<2>:
 
     our $foo = 1;
     my $cb;
@@ -419,28 +434,26 @@ Don't be fooled into thinking that this is a lexical binding though. While the c
       return $foo;
     }
 
-    frame(local => __PACKAGE__ . '::foo',
-          code => sub {
+    frame_local __PACKAGE__.'::foo', sub {
       $foo = 2;
       $cb = fub {
         return global_foo_getter();
       };
-    })->();
+    };
 
     say $foo;     # 1
     say $cb->();  # 2  <- still 2
     say $foo;     # 1
 
+You can install multiple local variables in the same frame with the C<frame> interface:
 
-You can install multiple local variables in the same frame:
-
-    frame(local => __PACKAGE__ . '::foo',
+    frame(local => __PACKAGE__.'::foo',
           local => 'main::bar',
-          ... );
+          code => { })->();
 
 Note that if you have both C<catch> and C<local> elements in a frame, in the event of an error the local bindings will B<not> be present inside the C<catch> handler (use a nested frame if you need this).
 
-All variable names must be fully package qualified. The best way to do this for variables in your current package is to use the ugly C<__PACKAGE__> technique.
+Variable names must be fully package qualified. The best way to do this for variables in your current package is to use the ugly C<__PACKAGE__> technique.
 
 Objects stored in local bindings managed by Callback::Frame will not be destroyed until all references to the frame-wrapped callback that contains the binding are destroyed, along with all references to any deeper frames.
 
@@ -450,13 +463,15 @@ Objects stored in local bindings managed by Callback::Frame will not be destroye
 
 L<The Callback::Frame github repo|https://github.com/hoytech/Callback-Frame>
 
-L<AnyEvent::Task> uses Callback::Frame.
+L<AnyEvent::Task> uses Callback::Frame and its docs have more discussion on exception handling in async apps.
 
-This module's C<catch> syntax is of course modeled after "normal language" style exception handling as implemented by L<Try::Tiny> &c.
+This module's C<catch> syntax is of course modeled after "normal language" style exception handling as implemented by L<Try::Tiny> and similar.
 
 This module depends on L<Guard> to maintain the C<$Callback::Frame::active_frames> datastructure and to ensure that C<local> binding updates aren't lost even when exceptions or other non-local returns occur.
 
-L<AnyEvent::Debug> is a very interesting and useful module that provides an interactive debugger for AnyEvent applications and uses some of the same techniques that Callback::Frame does. L<AnyEvent::Callback> and L<AnyEvent::CallbackStack> sort of solve the dynamic error handler problem. Unlike these modules, Callback::Frame is not related at all to L<AnyEvent>, except that it happens to be useful in AnyEvent libraries and applications (among other things).
+L<AnyEvent::Debug> provides an interactive debugger for AnyEvent applications and uses some of the same techniques that Callback::Frame does. L<AnyEvent::Callback> and L<AnyEvent::CallbackStack> sort of solve the dynamic error handler problem. Unlike these modules, Callback::Frame is not related at all to L<AnyEvent>, except that it happens to be useful in AnyEvent libraries and applications (among other things).
+
+L<Promises> and L<Future> are similar modules but they solve a slightly different problem. In the area of exception handling they require a more drastic restructuring of your async code because you need to pass "promise/future" objects around to maintain context. Callback::Frame is context-less (or rather the context is implicit in the dynamic state). That said, both of these modules should be compatible with Callback::Frame.
 
 Miscellaneous other modules: L<IO::Lambda::Backtrace>, L<POE::Filter::ErrorProof>
 
@@ -480,15 +495,8 @@ Doug Hoyte, C<< <doug@hcsw.org> >>
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2012-2013 Doug Hoyte.
+Copyright 2012-2014 Doug Hoyte.
 
 This module is licensed under the same terms as perl itself.
 
 =cut
-
-
-
-
-TODO:
-
-  * Maybe rewrite synopsis to use fub?
